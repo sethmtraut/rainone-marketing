@@ -45,6 +45,32 @@ function autoMap(headers: string[]): Record<string, number> {
   return map;
 }
 
+function splitLine(line: string, delim: string): string[] {
+  if (delim === "\t") return line.split("\t").map((c) => c.trim());
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else { q = false; }
+      } else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) { out.push(cur.trim()); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+function parseDelimited(text: string): string[][] {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n").filter((l) => l.trim() !== "");
+  if (!lines.length) return [];
+  const delim = lines[0].includes("\t") ? "\t" : ",";
+  return lines.map((line) => splitLine(line, delim));
+}
+
 function fmtTime(s: string | null) {
   if (!s) return "never";
   return new Date(s).toLocaleString();
@@ -56,6 +82,8 @@ export default function AddressTool() {
   const [dataRows, setDataRows] = useState<any[][]>([]);
   const [mapping, setMapping] = useState<Record<string, number>>({});
   const [parseError, setParseError] = useState("");
+  const [inputMode, setInputMode] = useState<"file" | "paste">("file");
+  const [pasteText, setPasteText] = useState("");
 
   const [matchBehavior, setMatchBehavior] = useState("remove");
   const [remailDays, setRemailDays] = useState(0);
@@ -98,6 +126,22 @@ export default function AddressTool() {
     } catch (e) {
       setParseError("Couldn't read that file. Use a .csv or .xlsx exported from your prospect list.");
     }
+  }
+
+  function handlePaste() {
+    setParseError("");
+    setResult(null);
+    const aoa = parseDelimited(pasteText);
+    if (aoa.length < 2) {
+      setParseError("Paste a header row plus at least one data row (tab- or comma-separated).");
+      return;
+    }
+    const hdr = aoa[0].map((x) => String(x ?? "").trim());
+    const rows = aoa.slice(1);
+    setHeaders(hdr);
+    setDataRows(rows);
+    setMapping(autoMap(hdr));
+    setFileName("Pasted rows");
   }
 
   const missingRequired = FIELDS.filter((f) => f.required && (mapping[f.key] === undefined || mapping[f.key] < 0)).map((f) => f.label);
@@ -181,13 +225,42 @@ export default function AddressTool() {
         <div className="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
           {/* Left: upload + mapping */}
           <section className="card p-5">
-            <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-amber-700">1 · Upload prospect list</h2>
-            <input
-              type="file"
-              accept=".csv,.xlsx,.xls"
-              onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
-              className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-amber-500 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-amber-950 hover:file:bg-amber-600"
-            />
+            <h2 className="mb-2 text-sm font-bold uppercase tracking-wide text-amber-700">1 · Add prospect list</h2>
+            <div className="mb-3 inline-flex rounded-md border border-amber-200 p-0.5 text-xs">
+              <button
+                onClick={() => setInputMode("file")}
+                className={"rounded px-3 py-1 font-semibold " + (inputMode === "file" ? "bg-amber-500 text-amber-950" : "text-amber-700")}
+              >
+                Upload file
+              </button>
+              <button
+                onClick={() => setInputMode("paste")}
+                className={"rounded px-3 py-1 font-semibold " + (inputMode === "paste" ? "bg-amber-500 text-amber-950" : "text-amber-700")}
+              >
+                Paste rows
+              </button>
+            </div>
+
+            {inputMode === "file" ? (
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+                className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-amber-500 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-amber-950 hover:file:bg-amber-600"
+              />
+            ) : (
+              <div>
+                <textarea
+                  className="textarea min-h-[120px] font-mono text-xs"
+                  placeholder={"Paste rows from Excel/Sheets (tab-separated) or CSV, including a header row. e.g.\nAddress\tCity\tState\tZip\n123 Main St\tColumbus\tOH\t43215"}
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                />
+                <button className="btn btn-secondary mt-2 text-xs" onClick={handlePaste} disabled={!pasteText.trim()}>
+                  Parse pasted rows
+                </button>
+              </div>
+            )}
             {parseError && <p className="mt-2 text-sm text-red-600">{parseError}</p>}
 
             {headers.length > 0 && (
