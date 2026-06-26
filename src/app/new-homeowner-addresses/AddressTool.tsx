@@ -71,6 +71,65 @@ function parseDelimited(text: string): string[][] {
   return lines.map((line) => splitLine(line, delim));
 }
 
+// Parse a pasted "sold homes" listing block (address + price/beds/baths/sqft per
+// listing) into standard columns. Returns null if it doesn't look like listings,
+// so the caller can fall back to tab/CSV parsing.
+function parseListings(text: string): { headers: string[]; rows: string[][] } | null {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*\*\s*\[?\$/.test(lines[i])) starts.push(i);
+  }
+  if (starts.length === 0) return null;
+
+  const rows: string[][] = [];
+  for (let b = 0; b < starts.length; b++) {
+    const from = starts[b];
+    const to = b + 1 < starts.length ? starts[b + 1] : lines.length;
+    const block = lines.slice(from, to);
+    const blob = block.join("\n");
+
+    const addrM = blob.match(/\[([^\]]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\]/);
+    if (!addrM) continue;
+    const addrFull = addrM[1].trim();
+    const parts = addrFull.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 3) continue;
+
+    const last = parts[parts.length - 1];
+    const zip = (last.match(/(\d{5})(?:-\d{4})?$/) || [])[1] ?? "";
+    const state = (last.match(/\b([A-Z]{2})\b/) || [])[1] ?? "";
+    const city = parts[parts.length - 2];
+    const street = parts.slice(0, parts.length - 2).join(", ");
+
+    const price = (block[0].match(/\[?\$([^\]\n]+?)\]/) || [])[1];
+    const beds = (blob.match(/(\d+)\s*bds?\b/i) || [])[1] ?? "";
+    const baths = (blob.match(/([\d.]+)\s*ba\b/i) || [])[1] ?? "";
+    const sqft = ((blob.match(/([\d,]+)\s*sqft/i) || [])[1] ?? "").replace(/,/g, "");
+    const sold = (blob.match(/Sold\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) || [])[1];
+    const status = sold ? `Sold ${sold}` : "Sold";
+
+    let source = "";
+    const addrLineIdx = block.findIndex((l) => l.includes(addrFull));
+    if (addrLineIdx >= 0) {
+      for (let k = addrLineIdx + 1; k < block.length; k++) {
+        const t = block[k].trim();
+        if (t && !/^(more|save|previous photo.*|next photo.*|loading\.*)$/i.test(t)) {
+          source = t;
+          break;
+        }
+      }
+    }
+
+    rows.push([street, city, state, zip, price ? `$${price.trim()}` : "", beds, baths, sqft, status, source]);
+  }
+
+  if (rows.length === 0) return null;
+  return {
+    headers: ["Address", "City", "State", "Zip", "List Price", "Beds", "Baths", "Sqft", "Status", "Source"],
+    rows,
+  };
+}
+
 function fmtTime(s: string | null) {
   if (!s) return "never";
   return new Date(s).toLocaleString();
@@ -131,9 +190,21 @@ export default function AddressTool() {
   function handlePaste() {
     setParseError("");
     setResult(null);
+
+    // First try the "sold listings" format (address + price/beds/baths/sqft blocks).
+    const listings = parseListings(pasteText);
+    if (listings) {
+      setHeaders(listings.headers);
+      setDataRows(listings.rows);
+      setMapping(autoMap(listings.headers));
+      setFileName(`Pasted listings (${listings.rows.length})`);
+      return;
+    }
+
+    // Otherwise treat it as tab- or comma-separated rows with a header line.
     const aoa = parseDelimited(pasteText);
     if (aoa.length < 2) {
-      setParseError("Paste a header row plus at least one data row (tab- or comma-separated).");
+      setParseError("Paste a header row plus data rows (tab/comma-separated), or paste a sold-listings results block.");
       return;
     }
     const hdr = aoa[0].map((x) => String(x ?? "").trim());
@@ -199,7 +270,7 @@ export default function AddressTool() {
               Upload a prospect address list. We remove existing Rain One customers and anyone already mailed, then output a clean Excel mail list.
             </p>
             <p className="mt-2 text-[11px] text-white/70">
-              This tool only processes address lists you upload. It does not scrape or pull from Zillow, realtor.com, or any listing site.
+              This tool only processes lists you paste or upload — it doesn&apos;t connect to or pull from any listing site. You&apos;re responsible for making sure any pasted data complies with its source&apos;s terms of use.
             </p>
           </div>
           <SignOutButton className="rounded-md border border-white/30 bg-white/10 px-3 py-1.5 text-sm text-white transition hover:bg-white/20" />
@@ -252,7 +323,7 @@ export default function AddressTool() {
               <div>
                 <textarea
                   className="textarea min-h-[120px] font-mono text-xs"
-                  placeholder={"Paste rows from Excel/Sheets (tab-separated) or CSV, including a header row. e.g.\nAddress\tCity\tState\tZip\n123 Main St\tColumbus\tOH\t43215"}
+                  placeholder={"Paste a sold-listings results block, OR rows from Excel/Sheets (tab/comma) with a header row, e.g.\nAddress\tCity\tState\tZip\n123 Main St\tColumbus\tOH\t43215"}
                   value={pasteText}
                   onChange={(e) => setPasteText(e.target.value)}
                 />
