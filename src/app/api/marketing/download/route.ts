@@ -1,7 +1,8 @@
 // GET /api/marketing/download?runId=all | <uuid>
-// Regenerates the .xlsx workbook from the database: a Summary sheet plus one
-// sheet per run, named by run date. Mailable rows first; any existing-customer
-// rows are listed below a divider.
+// Regenerates the .xlsx in Stannp's recipient-import format so it uploads
+// directly. The recipient list is the FIRST sheet (Stannp reads sheet 1).
+// A single run = one sheet; "all" = a combined "All Recipients" sheet first,
+// then one dated sheet per run for the archive.
 
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
@@ -11,25 +12,35 @@ import { getRunsForExport } from "@/lib/marketing-db";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+// Exact Stannp import header (order matters).
 const HEADERS = [
-  "Address", "City", "State", "ZIP", "Status", "List Price", "Beds", "Baths",
-  "Sqft", "Keyword Hit", "Source", "Date Pulled", "Notes",
+  "firstname", "lastname", "Address 1", "Address 2", "City", "State",
+  "Zipcode", "Country", "Animal", "Pet Name", "Renewal Date",
 ];
 
-function rowToArray(r: any) {
+function stannpRow(r: any) {
   return [
-    r.address ?? "", r.city ?? "", r.state ?? "", r.zip ?? "", r.status ?? "",
-    r.list_price ?? "", r.beds ?? "", r.baths ?? "", r.sqft ?? "", r.keyword_hit ?? "",
-    r.source ?? "", r.date_pulled ?? "", r.notes ?? "",
+    "",            // firstname (no homeowner name for new-mover mail)
+    "",            // lastname
+    r.address ?? "", // Address 1
+    "",            // Address 2 (unit, if any, is kept within Address 1)
+    r.city ?? "",
+    r.state ?? "",
+    r.zip ?? "",   // Zipcode
+    "US",          // Country
+    "", "", "",    // Animal, Pet Name, Renewal Date (n/a)
   ];
 }
+
+// Only mail rows that aren't flagged as existing customers.
+const mailable = (rows: any[]) => rows.filter((r) => r.notes !== "Existing Customer");
 
 function uniqueSheetName(base: string, used: Set<string>) {
   let name = base.slice(0, 31);
   let n = 2;
   while (used.has(name)) {
     const suffix = ` (${n})`;
-    name = (base.slice(0, 31 - suffix.length) + suffix);
+    name = base.slice(0, 31 - suffix.length) + suffix;
     n += 1;
   }
   used.add(name);
@@ -59,45 +70,27 @@ export async function GET(req: NextRequest) {
     }
 
     const wb = XLSX.utils.book_new();
+    const used = new Set<string>();
 
-    // Summary sheet.
-    const summaryAoa: any[][] = [
-      ["Rain One — Mail List Runs"],
-      [],
-      ["Run Date", "Label", "Uploaded", "Existing Customers", "Dupes (in-list)", "Dupes (prior)", "Net New", "Match Mode"],
-    ];
-    for (const run of runs) {
-      summaryAoa.push([
-        run.run_date, run.label ?? "", run.total_uploaded, run.removed_customers,
-        run.dupes_within, run.dupes_history, run.net_new, run.match_behavior,
-      ]);
-    }
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryAoa), "Summary");
+    const sheetFrom = (recipients: any[]) =>
+      XLSX.utils.aoa_to_sheet([HEADERS, ...recipients.map(stannpRow)]);
 
-    // One sheet per run.
-    const used = new Set<string>(["Summary"]);
-    for (const run of runs) {
-      const all = rowsByRun.get(run.id) ?? [];
-      const mailable = all.filter((r) => r.notes !== "Existing Customer");
-      const existing = all.filter((r) => r.notes === "Existing Customer");
-
-      const aoa: any[][] = [
-        ["New Homeowner Mail List", `Run ${run.run_date}`],
-        ["Uploaded", run.total_uploaded, "Existing customers", run.removed_customers],
-        ["Dupes (in-list)", run.dupes_within, "Dupes (prior runs)", run.dupes_history],
-        ["Net new mailable", run.net_new, "Match mode", run.match_behavior],
-        [],
-        HEADERS,
-        ...mailable.map(rowToArray),
-      ];
-      if (existing.length) {
-        aoa.push([], ["EXISTING CUSTOMERS — DO NOT MAIL"], HEADERS, ...existing.map(rowToArray));
+    if (runId) {
+      // Single run → one Stannp-ready sheet.
+      const run = runs[0];
+      const rec = mailable(rowsByRun.get(run.id) ?? []);
+      XLSX.utils.book_append_sheet(wb, sheetFrom(rec), uniqueSheetName(run.run_date, used));
+    } else {
+      // Full archive → combined recipients first, then one dated sheet per run.
+      XLSX.utils.book_append_sheet(wb, sheetFrom(mailable(rows)), uniqueSheetName("All Recipients", used));
+      for (const run of runs) {
+        const rec = mailable(rowsByRun.get(run.id) ?? []);
+        XLSX.utils.book_append_sheet(wb, sheetFrom(rec), uniqueSheetName(run.run_date, used));
       }
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), uniqueSheetName(run.run_date, used));
     }
 
     const buf: Buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-    const filename = runId ? `rainone-mail-list_${runs[0].run_date}.xlsx` : "rainone-mail-list.xlsx";
+    const filename = runId ? `stannp-mail-list_${runs[0].run_date}.xlsx` : "stannp-mail-list.xlsx";
 
     return new NextResponse(new Uint8Array(buf), {
       status: 200,
