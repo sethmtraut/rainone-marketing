@@ -74,53 +74,63 @@ function parseDelimited(text: string): string[][] {
 // Parse a pasted "sold homes" listing block (address + price/beds/baths/sqft per
 // listing) into standard columns. Returns null if it doesn't look like listings,
 // so the caller can fall back to tab/CSV parsing.
+const ADDR_RE = /([0-9][^[\]]*?,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)/;
+const LISTING_NOISE = /^(more|save|previous photo.*|next photo.*|loading\.*|for sale|see all|sort:.*|\d+\s+results?.*|recently sold.*|homes for you.*)$/i;
+
 function parseListings(text: string): { headers: string[]; rows: string[][] } | null {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const starts: number[] = [];
+  const lines = text.replace(/\r\n?/g, "\n").split("\n").map((l) => l.trim());
+
+  // Anchor on address lines ("Street, City, ST ZIP") — works for both the
+  // markdown copy ([addr](url)) and the plain-text copy.
+  const addrIdx: number[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*\*\s*\[?\$/.test(lines[i])) starts.push(i);
+    if (lines[i] && ADDR_RE.test(lines[i])) addrIdx.push(i);
   }
-  if (starts.length === 0) return null;
+  if (addrIdx.length === 0) return null;
 
   const rows: string[][] = [];
-  for (let b = 0; b < starts.length; b++) {
-    const from = starts[b];
-    const to = b + 1 < starts.length ? starts[b + 1] : lines.length;
-    const block = lines.slice(from, to);
-    const blob = block.join("\n");
+  for (let n = 0; n < addrIdx.length; n++) {
+    const ai = addrIdx[n];
+    const prevAi = n > 0 ? addrIdx[n - 1] : -1;
+    const back = lines.slice(prevAi + 1, ai).join("\n"); // price + stats sit above the address
+    const fwdEnd = n + 1 < addrIdx.length ? addrIdx[n + 1] : lines.length;
+    const fwd = lines.slice(ai + 1, Math.min(fwdEnd, ai + 8)); // brokerage + sold date below
 
-    const addrM = blob.match(/\[([^\]]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)\]/);
-    if (!addrM) continue;
-    const addrFull = addrM[1].trim();
-    const parts = addrFull.split(",").map((s) => s.trim()).filter(Boolean);
+    const am = lines[ai].match(ADDR_RE);
+    if (!am) continue;
+    const parts = am[1].trim().split(",").map((s) => s.trim()).filter(Boolean);
     if (parts.length < 3) continue;
-
     const last = parts[parts.length - 1];
     const zip = (last.match(/(\d{5})(?:-\d{4})?$/) || [])[1] ?? "";
     const state = (last.match(/\b([A-Z]{2})\b/) || [])[1] ?? "";
     const city = parts[parts.length - 2];
     const street = parts.slice(0, parts.length - 2).join(", ");
 
-    const price = (block[0].match(/\[?\$([^\]\n]+?)\]/) || [])[1];
-    const beds = (blob.match(/(\d+)\s*bds?\b/i) || [])[1] ?? "";
-    const baths = (blob.match(/([\d.]+)\s*ba\b/i) || [])[1] ?? "";
-    const sqft = ((blob.match(/([\d,]+)\s*sqft/i) || [])[1] ?? "").replace(/,/g, "");
-    const sold = (blob.match(/Sold\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) || [])[1];
+    const price = (back.match(/\$\s?[\d.,]+\s?[MK]?/i) || [])[0]?.replace(/\s/g, "") ?? "";
+    const beds = (back.match(/(\d+)\s*bds?/i) || [])[1] ?? "";
+    const baths = (back.match(/([\d.]+)\s*ba(?:ths?)?/i) || [])[1] ?? "";
+    const sqft = ((back.match(/([\d,]+)\s*sqft/i) || [])[1] ?? "").replace(/,/g, "");
+    // Sold date appears below the address; only read forward to avoid borrowing
+    // the previous listing's date.
+    const sold = (fwd.join("\n").match(/Sold\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) || [])[1];
     const status = sold ? `Sold ${sold}` : "Sold";
 
     let source = "";
-    const addrLineIdx = block.findIndex((l) => l.includes(addrFull));
-    if (addrLineIdx >= 0) {
-      for (let k = addrLineIdx + 1; k < block.length; k++) {
-        const t = block[k].trim();
-        if (t && !/^(more|save|previous photo.*|next photo.*|loading\.*)$/i.test(t)) {
-          source = t;
-          break;
-        }
+    for (const t of fwd) {
+      if (
+        t &&
+        !LISTING_NOISE.test(t) &&
+        !/^sold\b/i.test(t) &&
+        !ADDR_RE.test(t) &&
+        !/\$/.test(t) &&
+        !/bds?|sqft|\bba\b/i.test(t)
+      ) {
+        source = t;
+        break;
       }
     }
 
-    rows.push([street, city, state, zip, price ? `$${price.trim()}` : "", beds, baths, sqft, status, source]);
+    rows.push([street, city, state, zip, price, beds, baths, sqft, status, source]);
   }
 
   if (rows.length === 0) return null;
